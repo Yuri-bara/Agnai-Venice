@@ -47,6 +47,7 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 		public function __construct() {
 			add_action( 'rest_api_init', array( $this, 'register_routes' ) );
 			add_filter( 'rest_pre_serve_request', array( $this, 'serve_raw_proxy_response' ), 10, 4 );
+			add_filter( 'rest_post_dispatch', array( $this, 'add_cors_to_rest_response' ), 10, 3 );
 			add_action( 'admin_menu', array( $this, 'register_settings_page' ) );
 			add_action( 'admin_init', array( $this, 'register_settings' ) );
 		}
@@ -64,6 +65,10 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 		}
 
 		public function permission_check( WP_REST_Request $request ) {
+			if ( 'OPTIONS' === strtoupper( $request->get_method() ) ) {
+				return true;
+			}
+
 			$shared_secret = $this->get_proxy_shared_secret();
 
 			if ( '' === $shared_secret ) {
@@ -79,6 +84,10 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 		}
 
 		public function handle_proxy_request( WP_REST_Request $request ) {
+			if ( 'OPTIONS' === strtoupper( $request->get_method() ) ) {
+				return $this->build_cors_preflight_response();
+			}
+
 			$api_key = $this->get_api_key();
 			if ( '' === $api_key ) {
 				return new WP_Error( 'venice_proxy_missing_api_key', 'Missing Venice API key. Set VENICE_API_KEY constant or save venice_proxy_api_key in settings.', array( 'status' => 500 ) );
@@ -274,6 +283,7 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 				}
 				status_header( $final_status_code );
 				$this->send_headers_from_array( $this->filter_response_headers( $final_headers ) );
+				$this->send_cors_headers();
 				header( 'X-Venice-Proxy-Streaming: best-effort', true );
 				$headers_sent = true;
 			};
@@ -366,6 +376,7 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			if ( ! headers_sent() ) {
 				status_header( (int) $data['status'] );
 				$this->send_headers_from_array( $data['headers'] );
+				$this->send_cors_headers();
 			}
 
 			if ( ! $data['is_head'] ) {
@@ -379,11 +390,45 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			return is_array( $data ) && ! empty( $data['__venice_proxy_raw'] ) && isset( $data['status'], $data['headers'], $data['body'], $data['is_head'] );
 		}
 
+		public function add_cors_to_rest_response( $response, $server, $request ) {
+			if ( ! ( $request instanceof WP_REST_Request ) || ! $this->is_proxy_namespace_request( $request ) ) {
+				return $response;
+			}
+
+			if ( $response instanceof WP_HTTP_Response ) {
+				$response->header( 'Access-Control-Allow-Origin', '*' );
+				$response->header( 'Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD' );
+				$response->header( 'Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Venice-Proxy-Secret' );
+				$response->header( 'Access-Control-Max-Age', '600' );
+			}
+
+			return $response;
+		}
 
 		private function send_headers_from_array( array $headers ) {
 			foreach ( $headers as $name => $value ) {
 				header( $name . ': ' . $value, true );
 			}
+		}
+
+		private function send_cors_headers() {
+			header( 'Access-Control-Allow-Origin: *', true );
+			header( 'Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD', true );
+			header( 'Access-Control-Allow-Headers: Authorization, Content-Type, X-Venice-Proxy-Secret', true );
+			header( 'Access-Control-Max-Age: 600', true );
+		}
+
+		private function build_cors_preflight_response() {
+			$response = new WP_REST_Response( array( 'ok' => true ), 200 );
+			$response->header( 'Access-Control-Allow-Origin', '*' );
+			$response->header( 'Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD' );
+			$response->header( 'Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Venice-Proxy-Secret' );
+			$response->header( 'Access-Control-Max-Age', '600' );
+			return $response;
+		}
+
+		private function is_proxy_namespace_request( WP_REST_Request $request ) {
+			return 0 === strpos( $request->get_route(), '/wp-json/' . self::NAMESPACE . '/' ) || 0 === strpos( $request->get_route(), '/' . self::NAMESPACE . '/' );
 		}
 
 		private function canonical_header_name( $name ) {
