@@ -106,7 +106,7 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			}
 
 			if ( $body_info['is_stream'] ) {
-				return $this->stream_with_curl( $request->get_method(), $target_url, $headers, $body_info['body'], 'HEAD' === strtoupper( $request->get_method() ) );
+				return $this->stream_with_curl( $request, $request->get_method(), $target_url, $headers, $body_info['body'], 'HEAD' === strtoupper( $request->get_method() ) );
 			}
 
 			$args = array(
@@ -260,7 +260,7 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			return $value;
 		}
 
-		private function stream_with_curl( $method, $url, array $headers, $body, $is_head ) {
+		private function stream_with_curl( WP_REST_Request $request, $method, $url, array $headers, $body, $is_head ) {
 			if ( ! function_exists( 'curl_init' ) ) {
 				return new WP_Error( 'venice_proxy_streaming_unavailable', 'Streaming is unavailable because cURL is not installed.', array( 'status' => 500 ) );
 			}
@@ -409,7 +409,10 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 		}
 
 		private function send_cors_headers( WP_REST_Request $request = null ) {
-			header( 'Access-Control-Allow-Origin: *', true );
+			$allowed_origin = $this->get_cors_allow_origin_value( $request );
+			if ( '' !== $allowed_origin ) {
+				header( 'Access-Control-Allow-Origin: ' . $allowed_origin, true );
+			}
 			header( 'Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD', true );
 			header( 'Access-Control-Allow-Headers: ' . $this->get_cors_allow_headers_value( $request ), true );
 			header( 'Access-Control-Max-Age: 600', true );
@@ -417,7 +420,10 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 		}
 
 		private function add_cors_headers_to_response( WP_HTTP_Response $response, WP_REST_Request $request = null ) {
-			$response->header( 'Access-Control-Allow-Origin', '*' );
+			$allowed_origin = $this->get_cors_allow_origin_value( $request );
+			if ( '' !== $allowed_origin ) {
+				$response->header( 'Access-Control-Allow-Origin', $allowed_origin );
+			}
 			$response->header( 'Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD' );
 			$response->header( 'Access-Control-Allow-Headers', $this->get_cors_allow_headers_value( $request ) );
 			$response->header( 'Access-Control-Max-Age', '600' );
@@ -432,17 +438,55 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 
 
 		private function get_cors_allow_headers_value( WP_REST_Request $request = null ) {
-			$fallback = 'Authorization, Content-Type, X-Venice-Proxy-Secret';
+			$fallback = 'authorization, content-type, x-venice-proxy-secret, accept';
 			if ( ! ( $request instanceof WP_REST_Request ) ) {
 				return $fallback;
 			}
 
-			$requested_headers = $this->safe_header_value( (string) $request->get_header( 'access-control-request-headers' ) );
+			$requested_headers = $this->sanitize_cors_request_headers( (string) $request->get_header( 'access-control-request-headers' ) );
 			if ( '' === $requested_headers ) {
 				return $fallback;
 			}
 
 			return $requested_headers;
+		}
+
+		private function get_cors_allow_origin_value( WP_REST_Request $request = null ) {
+			if ( ! ( $request instanceof WP_REST_Request ) ) {
+				return '';
+			}
+
+			$origin = $this->safe_header_value( (string) $request->get_header( 'origin' ) );
+			if ( 'https://agnai.chat' === $origin ) {
+				return $origin;
+			}
+
+			return '';
+		}
+
+		private function sanitize_cors_request_headers( $requested_headers ) {
+			$raw = $this->safe_header_value( (string) $requested_headers );
+			if ( '' === $raw ) {
+				return '';
+			}
+
+			$tokens = array();
+			foreach ( explode( ',', $raw ) as $token ) {
+				$name = strtolower( trim( (string) $token ) );
+				if ( '' === $name ) {
+					continue;
+				}
+				if ( 1 !== preg_match( '/^[a-z0-9!#$%&\'*+.^_`|~-]+$/', $name ) ) {
+					continue;
+				}
+				$tokens[] = $name;
+			}
+
+			if ( empty( $tokens ) ) {
+				return '';
+			}
+
+			return implode( ', ', $tokens );
 		}
 
 		private function is_proxy_namespace_request( WP_REST_Request $request ) {
