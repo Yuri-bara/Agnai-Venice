@@ -457,7 +457,12 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			}
 
 			$origin = $this->safe_header_value( (string) $request->get_header( 'origin' ) );
-			if ( 'https://agnai.chat' === $origin ) {
+			$allowed_origins = array(
+				'https://agnai.chat',
+				'https://hcatoolkit.com',
+			);
+
+			if ( in_array( $origin, $allowed_origins, true ) ) {
 				return $origin;
 			}
 
