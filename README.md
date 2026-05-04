@@ -204,3 +204,63 @@ On shared hosting (including DreamHost), buffering may prevent token-by-token ou
   - Fix by updating/reinstalling the latest plugin ZIP on the WordPress site.
   - Confirm preflight includes `Access-Control-Allow-Headers: authorization` (for `/models`) and `Access-Control-Allow-Headers: authorization, content-type` (for `/chat/completions`) or a sanitized echoed list that contains those headers.
   - GitHub merges do not auto-update `hcatoolkit.com`; you must manually install/update the plugin in WordPress after merging.
+
+## Verify the live WordPress plugin version
+
+Use these checks after uploading/reinstalling the plugin ZIP in WordPress.
+
+### Debug route
+
+```bash
+curl -i \
+  "https://hcatoolkit.com/wp-json/venice-proxy/v1/__debug/cors" \
+  -H "Origin: https://agnai.chat" \
+  -H "Access-Control-Request-Headers: authorization, content-type"
+```
+
+Expected:
+
+- `X-Venice-Proxy-Version: 0.1.3-cors-diagnostics`
+- `X-Venice-Proxy-Route: 1`
+- `Access-Control-Allow-Origin: https://agnai.chat`
+
+### Models preflight
+
+```bash
+curl -i -X OPTIONS \
+  "https://hcatoolkit.com/wp-json/venice-proxy/v1/models" \
+  -H "Origin: https://agnai.chat" \
+  -H "Access-Control-Request-Method: GET" \
+  -H "Access-Control-Request-Headers: authorization"
+```
+
+Expected:
+
+- `Access-Control-Allow-Origin: https://agnai.chat`
+- `Access-Control-Allow-Headers: authorization, content-type, accept, x-venice-proxy-secret`
+- `X-Venice-Proxy-Version: 0.1.3-cors-diagnostics`
+- `X-Venice-Proxy-Route: 1`
+
+### Chat preflight
+
+```bash
+curl -i -X OPTIONS \
+  "https://hcatoolkit.com/wp-json/venice-proxy/v1/chat/completions" \
+  -H "Origin: https://agnai.chat" \
+  -H "Access-Control-Request-Method: POST" \
+  -H "Access-Control-Request-Headers: authorization, content-type"
+```
+
+Expected:
+
+- `Access-Control-Allow-Origin: https://agnai.chat`
+- `Access-Control-Allow-Headers: authorization, content-type, accept, x-venice-proxy-secret`
+- `X-Venice-Proxy-Version: 0.1.3-cors-diagnostics`
+- `X-Venice-Proxy-Route: 1`
+
+Interpretation:
+
+- If `X-Venice-Proxy-Version` is missing, the updated plugin is not handling the request.
+- If `X-Venice-Proxy-Version` is old, WordPress is still running an older plugin file.
+- If `X-Venice-Proxy-Version` is correct but `authorization` is missing from `Access-Control-Allow-Headers`, the plugin CORS computation is still wrong.
+- GitHub merges do not auto-update `hcatoolkit.com`; you must reinstall/upload the plugin ZIP in WordPress.

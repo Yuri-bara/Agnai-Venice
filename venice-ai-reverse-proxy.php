@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Venice AI Reverse Proxy
  * Description: Reverse proxy for Venice AI API that strips disallowed fields like `think` from JSON payloads.
- * Version: 0.1.0
+ * Version: 0.1.3
  * Author: Agnai Venice Proxy
  * License: GPL-2.0-or-later
  */
@@ -14,6 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 	class Venice_AI_Reverse_Proxy {
 		const NAMESPACE = 'venice-proxy/v1';
+		const PLUGIN_VERSION = '0.1.3-cors-diagnostics';
 		const DEFAULT_TARGET_BASE = 'https://api.venice.ai/api/v1';
 		const DEFAULT_TIMEOUT = 120;
 
@@ -53,6 +54,16 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 		}
 
 		public function register_routes() {
+			register_rest_route(
+				self::NAMESPACE,
+				'/__debug/cors',
+				array(
+					'methods'             => array( 'GET', 'OPTIONS' ),
+					'permission_callback' => '__return_true',
+					'callback'            => array( $this, 'handle_debug_cors_request' ),
+				)
+			);
+
 			register_rest_route(
 				self::NAMESPACE,
 				'/(?P<proxy_path>.*)',
@@ -133,6 +144,29 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 				wp_remote_retrieve_body( $upstream ),
 				'HEAD' === strtoupper( $request->get_method() )
 			);
+		}
+
+		public function handle_debug_cors_request( WP_REST_Request $request ) {
+			if ( 'OPTIONS' === strtoupper( $request->get_method() ) ) {
+				return $this->build_cors_preflight_response( $request );
+			}
+
+			$response = new WP_REST_Response(
+				array(
+					'plugin'               => 'venice-ai-reverse-proxy',
+					'version'              => self::PLUGIN_VERSION,
+					'routeHandledByPlugin' => true,
+					'origin'               => $this->safe_header_value( (string) $request->get_header( 'origin' ) ),
+					'allowOrigin'          => $this->get_cors_allow_origin_value( $request ),
+					'requestMethod'        => $this->safe_header_value( (string) $request->get_header( 'access-control-request-method' ) ),
+					'requestHeaders'       => $this->sanitize_cors_request_headers( (string) $request->get_header( 'access-control-request-headers' ) ),
+					'allowHeaders'         => $this->get_cors_allow_headers_value( $request ),
+					'allowMethods'         => 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD',
+				),
+				200
+			);
+			$this->add_no_cache_headers_to_response( $response );
+			return $response;
 		}
 
 		private function build_target_url( WP_REST_Request $request ) {
@@ -417,6 +451,7 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			header( 'Access-Control-Allow-Headers: ' . $this->get_cors_allow_headers_value( $request ), true );
 			header( 'Access-Control-Max-Age: 600', true );
 			header( 'Vary: Origin, Access-Control-Request-Method, Access-Control-Request-Headers', true );
+			$this->send_plugin_debug_headers();
 		}
 
 		private function add_cors_headers_to_response( WP_HTTP_Response $response, WP_REST_Request $request = null ) {
@@ -428,17 +463,34 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			$response->header( 'Access-Control-Allow-Headers', $this->get_cors_allow_headers_value( $request ) );
 			$response->header( 'Access-Control-Max-Age', '600' );
 			$response->header( 'Vary', 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers' );
+			$this->add_plugin_debug_headers_to_response( $response );
 		}
 
 		private function build_cors_preflight_response( WP_REST_Request $request ) {
 			$response = new WP_REST_Response( array( 'ok' => true ), 200 );
 			$this->add_cors_headers_to_response( $response, $request );
+			$this->add_no_cache_headers_to_response( $response );
 			return $response;
 		}
 
+		private function add_no_cache_headers_to_response( WP_HTTP_Response $response ) {
+			$response->header( 'Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0' );
+			$response->header( 'Pragma', 'no-cache' );
+		}
+
+		private function send_plugin_debug_headers() {
+			header( 'X-Venice-Proxy-Version: ' . self::PLUGIN_VERSION, true );
+			header( 'X-Venice-Proxy-Route: 1', true );
+		}
+
+		private function add_plugin_debug_headers_to_response( WP_HTTP_Response $response ) {
+			$response->header( 'X-Venice-Proxy-Version', self::PLUGIN_VERSION );
+			$response->header( 'X-Venice-Proxy-Route', '1' );
+		}
 
 		private function get_cors_allow_headers_value( WP_REST_Request $request = null ) {
-			$fallback = 'authorization, content-type, x-venice-proxy-secret, accept';
+			$minimum_tokens = array( 'authorization', 'content-type', 'accept', 'x-venice-proxy-secret' );
+			$fallback       = implode( ', ', $minimum_tokens );
 			if ( ! ( $request instanceof WP_REST_Request ) ) {
 				return $fallback;
 			}
@@ -448,7 +500,16 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 				return $fallback;
 			}
 
-			return $requested_headers;
+			$tokens = array();
+			foreach ( explode( ',', $requested_headers ) as $token ) {
+				$name = strtolower( trim( (string) $token ) );
+				if ( '' !== $name ) {
+					$tokens[] = $name;
+				}
+			}
+
+			$merged = array_values( array_unique( array_merge( $tokens, $minimum_tokens ) ) );
+			return implode( ', ', $merged );
 		}
 
 		private function get_cors_allow_origin_value( WP_REST_Request $request = null ) {
