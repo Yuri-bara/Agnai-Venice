@@ -90,6 +90,18 @@ Actual proxy responses (non-streaming, streaming, and plugin-generated REST erro
 
 If the WordPress site still behaves like the old version, reinstall/update the plugin ZIP from the latest `main` branch after PR #5.
 
+## Troubleshooting preflight interception (0.1.4)
+
+If Agnaistic still says `authorization` is not allowed by `Access-Control-Allow-Headers`:
+
+- The debug GET route can prove the plugin is installed, but it is not the same request path as a browser `OPTIONS` preflight.
+- The failing request is specifically browser preflight to `/models` or `/chat/completions`.
+- Preflight responses should include `X-Venice-Proxy-Version: 0.1.4-force-preflight`.
+- If debug route works but `OPTIONS` responses do not include plugin debug headers, something is intercepting `OPTIONS` before or after normal route dispatch.
+- Build `0.1.4-force-preflight` adds a `rest_pre_dispatch` short-circuit for `/venice-proxy/v1/*` to force plugin-owned preflight behavior.
+- Browser-friendly debug URL:
+  - `https://hcatoolkit.com/wp-json/venice-proxy/v1/__debug/cors?origin=https%3A%2F%2Fagnai.chat&method=POST&headers=authorization%2Ccontent-type`
+
 ## cURL examples (placeholders only)
 
 ### Preflight test (browser-style CORS check)
@@ -202,7 +214,8 @@ On shared hosting (including DreamHost), buffering may prevent token-by-token ou
   - If your failing URL is `/wp-json/venice-proxy/v1/models` or `/wp-json/venice-proxy/v1/chat/completions`, the endpoint path is correct.
   - The failure means browser preflight did not allow the `authorization` request header.
   - Fix by updating/reinstalling the latest plugin ZIP on the WordPress site.
-  - Confirm preflight includes `Access-Control-Allow-Headers: authorization` (for `/models`) and `Access-Control-Allow-Headers: authorization, content-type` (for `/chat/completions`) or a sanitized echoed list that contains those headers.
+  - Confirm preflight includes `Access-Control-Allow-Headers: authorization, content-type, accept, x-venice-proxy-secret`.
+  - Confirm preflight includes `X-Venice-Proxy-Version: 0.1.4-force-preflight`.
   - GitHub merges do not auto-update `hcatoolkit.com`; you must manually install/update the plugin in WordPress after merging.
 
 ## Verify the live WordPress plugin version
@@ -220,7 +233,7 @@ curl -i \
 
 Expected:
 
-- `X-Venice-Proxy-Version: 0.1.3-cors-diagnostics`
+- `X-Venice-Proxy-Version: 0.1.4-force-preflight`
 - `X-Venice-Proxy-Route: 1`
 - `Access-Control-Allow-Origin: https://agnai.chat`
 
@@ -238,7 +251,7 @@ Expected:
 
 - `Access-Control-Allow-Origin: https://agnai.chat`
 - `Access-Control-Allow-Headers: authorization, content-type, accept, x-venice-proxy-secret`
-- `X-Venice-Proxy-Version: 0.1.3-cors-diagnostics`
+- `X-Venice-Proxy-Version: 0.1.4-force-preflight`
 - `X-Venice-Proxy-Route: 1`
 
 ### Chat preflight
@@ -255,7 +268,7 @@ Expected:
 
 - `Access-Control-Allow-Origin: https://agnai.chat`
 - `Access-Control-Allow-Headers: authorization, content-type, accept, x-venice-proxy-secret`
-- `X-Venice-Proxy-Version: 0.1.3-cors-diagnostics`
+- `X-Venice-Proxy-Version: 0.1.4-force-preflight`
 - `X-Venice-Proxy-Route: 1`
 
 Interpretation:
