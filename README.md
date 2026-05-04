@@ -77,8 +77,9 @@ For `/wp-json/venice-proxy/v1/*`, the plugin now handles browser preflight (`OPT
 - sends:
   - `Access-Control-Allow-Origin: *`
   - `Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD`
-  - `Access-Control-Allow-Headers: Authorization, Content-Type, X-Venice-Proxy-Secret`
+  - `Access-Control-Allow-Headers: <echoes Access-Control-Request-Headers when present, else Authorization, Content-Type, X-Venice-Proxy-Secret>`
   - `Access-Control-Max-Age: 600`
+  - `Vary: Origin, Access-Control-Request-Method, Access-Control-Request-Headers`
 
 Actual API methods (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`) still require proxy-secret auth via:
 
@@ -86,6 +87,8 @@ Actual API methods (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`) still requi
 - `X-Venice-Proxy-Secret: <VENICE_PROXY_SHARED_SECRET>`.
 
 Actual responses include `Access-Control-Allow-Origin: *` so browser clients can read proxy responses.
+
+If the WordPress site still behaves like the old version, reinstall/update the plugin ZIP from the latest `main` branch after PR #5.
 
 ## cURL examples (placeholders only)
 
@@ -96,15 +99,16 @@ curl -i -X OPTIONS \
   "https://hcatoolkit.com/wp-json/venice-proxy/v1/chat/completions" \
   -H "Origin: https://hcatoolkit.com" \
   -H "Access-Control-Request-Method: POST" \
-  -H "Access-Control-Request-Headers: authorization, content-type"
+  -H "Access-Control-Request-Headers: authorization, content-type, x-requested-with"
 ```
 
 Expected:
 
 - success response
-- includes `Access-Control-Allow-Origin`
-- includes `Access-Control-Allow-Methods`
-- includes `Access-Control-Allow-Headers`
+- includes `Access-Control-Allow-Origin: *`
+- includes `Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD`
+- includes `Access-Control-Allow-Headers: authorization, content-type, x-requested-with`
+- includes `Vary: Origin, Access-Control-Request-Method, Access-Control-Request-Headers`
 - does not require proxy secret
 
 ### Direct Venice request
