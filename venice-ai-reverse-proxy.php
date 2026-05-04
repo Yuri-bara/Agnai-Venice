@@ -47,6 +47,8 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 		public function __construct() {
 			add_action( 'rest_api_init', array( $this, 'register_routes' ) );
 			add_filter( 'rest_pre_serve_request', array( $this, 'serve_raw_proxy_response' ), 10, 4 );
+			add_action( 'admin_menu', array( $this, 'register_settings_page' ) );
+			add_action( 'admin_init', array( $this, 'register_settings' ) );
 		}
 
 		public function register_routes() {
@@ -62,10 +64,10 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 		}
 
 		public function permission_check( WP_REST_Request $request ) {
-			$shared_secret = defined( 'VENICE_PROXY_SHARED_SECRET' ) ? (string) VENICE_PROXY_SHARED_SECRET : '';
+			$shared_secret = $this->get_proxy_shared_secret();
 
 			if ( '' === $shared_secret ) {
-				return new WP_Error( 'venice_proxy_missing_secret', 'Missing VENICE_PROXY_SHARED_SECRET constant.', array( 'status' => 500 ) );
+				return new WP_Error( 'venice_proxy_missing_secret', 'Missing proxy shared secret. Set VENICE_PROXY_SHARED_SECRET constant or save venice_proxy_shared_secret in settings.', array( 'status' => 500 ) );
 			}
 
 			$provided_secret = $this->extract_proxy_secret( $request );
@@ -77,9 +79,9 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 		}
 
 		public function handle_proxy_request( WP_REST_Request $request ) {
-			$api_key = defined( 'VENICE_API_KEY' ) ? (string) VENICE_API_KEY : '';
+			$api_key = $this->get_api_key();
 			if ( '' === $api_key ) {
-				return new WP_Error( 'venice_proxy_missing_api_key', 'Missing VENICE_API_KEY constant.', array( 'status' => 500 ) );
+				return new WP_Error( 'venice_proxy_missing_api_key', 'Missing Venice API key. Set VENICE_API_KEY constant or save venice_proxy_api_key in settings.', array( 'status' => 500 ) );
 			}
 
 			$target_url = $this->build_target_url( $request );
@@ -125,7 +127,7 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 		}
 
 		private function build_target_url( WP_REST_Request $request ) {
-			$base       = defined( 'VENICE_PROXY_TARGET_BASE' ) ? (string) VENICE_PROXY_TARGET_BASE : self::DEFAULT_TARGET_BASE;
+			$base       = $this->get_target_base();
 			$proxy_path = (string) $request->get_param( 'proxy_path' );
 			$safe_path  = $this->sanitize_proxy_path( $proxy_path );
 			if ( '' === $safe_path && '' !== trim( $proxy_path ) ) {
@@ -441,7 +443,123 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 		}
 
 		private function get_timeout() {
-			$timeout = defined( 'VENICE_PROXY_TIMEOUT' ) ? (int) VENICE_PROXY_TIMEOUT : self::DEFAULT_TIMEOUT;
+			if ( defined( 'VENICE_PROXY_TIMEOUT' ) ) {
+				$timeout = (int) VENICE_PROXY_TIMEOUT;
+				return $timeout > 0 ? $timeout : self::DEFAULT_TIMEOUT;
+			}
+
+			$timeout = (int) get_option( 'venice_proxy_timeout', self::DEFAULT_TIMEOUT );
+			return $timeout > 0 ? $timeout : self::DEFAULT_TIMEOUT;
+		}
+
+		private function get_api_key() {
+			if ( defined( 'VENICE_API_KEY' ) ) {
+				return trim( (string) VENICE_API_KEY );
+			}
+			return trim( (string) get_option( 'venice_proxy_api_key', '' ) );
+		}
+
+		private function get_proxy_shared_secret() {
+			if ( defined( 'VENICE_PROXY_SHARED_SECRET' ) ) {
+				return trim( (string) VENICE_PROXY_SHARED_SECRET );
+			}
+			return trim( (string) get_option( 'venice_proxy_shared_secret', '' ) );
+		}
+
+		private function get_target_base() {
+			if ( defined( 'VENICE_PROXY_TARGET_BASE' ) ) {
+				$constant_url = esc_url_raw( trim( (string) VENICE_PROXY_TARGET_BASE ) );
+				return '' !== $constant_url ? $constant_url : self::DEFAULT_TARGET_BASE;
+			}
+			$option_url = esc_url_raw( trim( (string) get_option( 'venice_proxy_target_base', self::DEFAULT_TARGET_BASE ) ) );
+			return '' !== $option_url ? $option_url : self::DEFAULT_TARGET_BASE;
+		}
+
+		public function register_settings_page() {
+			add_options_page(
+				'Venice AI Proxy',
+				'Venice AI Proxy',
+				'manage_options',
+				'venice-ai-proxy',
+				array( $this, 'render_settings_page' )
+			);
+		}
+
+		public function register_settings() {
+			register_setting( 'venice_proxy_settings', 'venice_proxy_api_key', array( $this, 'sanitize_secret_text' ) );
+			register_setting( 'venice_proxy_settings', 'venice_proxy_shared_secret', array( $this, 'sanitize_secret_text' ) );
+			register_setting( 'venice_proxy_settings', 'venice_proxy_target_base', array( $this, 'sanitize_target_base' ) );
+			register_setting( 'venice_proxy_settings', 'venice_proxy_timeout', array( $this, 'sanitize_timeout' ) );
+
+			add_settings_section( 'venice_proxy_main', 'Proxy Credentials and Target', '__return_false', 'venice-ai-proxy' );
+			add_settings_field( 'venice_proxy_api_key', 'Venice API Key', array( $this, 'render_api_key_field' ), 'venice-ai-proxy', 'venice_proxy_main' );
+			add_settings_field( 'venice_proxy_shared_secret', 'Proxy Shared Secret', array( $this, 'render_shared_secret_field' ), 'venice-ai-proxy', 'venice_proxy_main' );
+			add_settings_field( 'venice_proxy_target_base', 'Target Base URL', array( $this, 'render_target_base_field' ), 'venice-ai-proxy', 'venice_proxy_main' );
+			add_settings_field( 'venice_proxy_timeout', 'Timeout Seconds', array( $this, 'render_timeout_field' ), 'venice-ai-proxy', 'venice_proxy_main' );
+		}
+
+		public function render_settings_page() {
+			if ( ! current_user_can( 'manage_options' ) ) {
+				return;
+			}
+			?>
+			<div class="wrap">
+				<h1>Venice AI Proxy</h1>
+				<p>Use a long random proxy shared secret. This is the API key you put into Agnai/Agnaistic. It is not your Venice API key.</p>
+				<form method="post" action="options.php">
+					<?php
+					settings_fields( 'venice_proxy_settings' );
+					do_settings_sections( 'venice-ai-proxy' );
+					submit_button();
+					?>
+				</form>
+			</div>
+			<?php
+		}
+
+		public function render_api_key_field() {
+			$value = defined( 'VENICE_API_KEY' ) ? '' : (string) get_option( 'venice_proxy_api_key', '' );
+			printf( '<input type="password" name="venice_proxy_api_key" value="%s" class="regular-text" autocomplete="new-password" />', esc_attr( $value ) );
+			if ( defined( 'VENICE_API_KEY' ) ) {
+				echo '<p class="description">VENICE_API_KEY constant is defined and overrides this saved value.</p>';
+				return;
+			}
+			echo '<p class="description">Your real Venice API key used for upstream requests.</p>';
+		}
+
+		public function render_shared_secret_field() {
+			$value = defined( 'VENICE_PROXY_SHARED_SECRET' ) ? '' : (string) get_option( 'venice_proxy_shared_secret', '' );
+			printf( '<input type="password" name="venice_proxy_shared_secret" value="%s" class="regular-text" autocomplete="new-password" />', esc_attr( $value ) );
+			if ( defined( 'VENICE_PROXY_SHARED_SECRET' ) ) {
+				echo '<p class="description">VENICE_PROXY_SHARED_SECRET constant is defined and overrides this saved value.</p>';
+				return;
+			}
+			echo '<p class="description">Used by Agnai/Agnaistic as the API key for this proxy endpoint.</p>';
+		}
+
+		public function render_target_base_field() {
+			$value = defined( 'VENICE_PROXY_TARGET_BASE' ) ? (string) VENICE_PROXY_TARGET_BASE : (string) get_option( 'venice_proxy_target_base', self::DEFAULT_TARGET_BASE );
+			printf( '<input type="url" name="venice_proxy_target_base" value="%s" class="regular-text code" />', esc_attr( $value ) );
+			echo '<p class="description">Default: ' . esc_html( self::DEFAULT_TARGET_BASE ) . '</p>';
+		}
+
+		public function render_timeout_field() {
+			$value = defined( 'VENICE_PROXY_TIMEOUT' ) ? (int) VENICE_PROXY_TIMEOUT : (int) get_option( 'venice_proxy_timeout', self::DEFAULT_TIMEOUT );
+			printf( '<input type="number" min="1" step="1" name="venice_proxy_timeout" value="%d" class="small-text" />', (int) $value );
+			echo '<p class="description">Request timeout in seconds. Default: ' . (int) self::DEFAULT_TIMEOUT . '.</p>';
+		}
+
+		public function sanitize_secret_text( $value ) {
+			return trim( sanitize_text_field( (string) $value ) );
+		}
+
+		public function sanitize_target_base( $value ) {
+			$url = esc_url_raw( trim( (string) $value ) );
+			return '' !== $url ? $url : self::DEFAULT_TARGET_BASE;
+		}
+
+		public function sanitize_timeout( $value ) {
+			$timeout = absint( $value );
 			return $timeout > 0 ? $timeout : self::DEFAULT_TIMEOUT;
 		}
 	}

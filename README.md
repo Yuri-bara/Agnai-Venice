@@ -18,21 +18,38 @@ The proxy preserves Venice-compatible `reasoning` payloads and only strips disal
 
 1. Put `venice-ai-reverse-proxy.php` in:
    - `wp-content/plugins/venice-ai-reverse-proxy/venice-ai-reverse-proxy.php`
-2. In `wp-config.php`, set required constants:
+2. Activate **Venice AI Reverse Proxy** from WordPress Admin → Plugins.
+
+### Option A: Admin settings page (no `wp-config.php` edits required)
+
+1. Go to **Settings → Venice AI Proxy**.
+2. Add:
+   - **Venice API Key**: your real Venice API key.
+   - **Proxy Shared Secret**: a long random secret.
+   - **Target Base URL**: leave default unless you have a specific Venice-compatible base.
+   - **Timeout Seconds**: default `120`.
+3. Save settings.
+4. In Agnai/Agnaistic, use the **Proxy Shared Secret** as the API key for this WordPress proxy.
+
+Use a long random proxy secret. This is the API key you put into Agnai/Agnaistic. It is not your Venice API key.
+
+### Option B: `wp-config.php` constants (advanced / preferred for immutable config)
+
+Set required constants:
 
 ```php
 define( 'VENICE_API_KEY', 'YOUR_VENICE_API_KEY' );
 define( 'VENICE_PROXY_SHARED_SECRET', 'YOUR_PROXY_SHARED_SECRET' );
 ```
 
-3. Optional constants:
+Optional constants:
 
 ```php
 define( 'VENICE_PROXY_TARGET_BASE', 'https://api.venice.ai/api/v1' );
 define( 'VENICE_PROXY_TIMEOUT', 120 );
 ```
 
-4. Activate **Venice AI Reverse Proxy** from WordPress Admin → Plugins.
+Constants override saved admin settings when both are present.
 
 ## Agnai/Agnaistic setup
 
@@ -108,7 +125,7 @@ On shared hosting (including DreamHost), buffering may prevent token-by-token ou
 - **403 Invalid or missing proxy shared secret**
   - Ensure `Authorization: Bearer <VENICE_PROXY_SHARED_SECRET>` or `X-Venice-Proxy-Secret` matches exactly.
 - **500 Missing VENICE_API_KEY**
-  - Add `VENICE_API_KEY` constant in `wp-config.php`.
+  - Add Venice API key via **Settings → Venice AI Proxy** or define `VENICE_API_KEY` in `wp-config.php`.
 - **404 REST route not found**
   - Confirm plugin is activated and URL is `/wp-json/venice-proxy/v1/...`.
 - **Upstream Venice errors (4xx/5xx)**
