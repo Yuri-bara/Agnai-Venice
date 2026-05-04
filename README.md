@@ -75,7 +75,7 @@ For `/wp-json/venice-proxy/v1/*`, the plugin now handles browser preflight (`OPT
 - returns success without forwarding to Venice;
 - does not require `VENICE_PROXY_SHARED_SECRET` for `OPTIONS`;
 - sends:
-  - `Access-Control-Allow-Origin: https://agnai.chat` (when `Origin` is `https://agnai.chat`)
+  - `Access-Control-Allow-Origin` reflected only for allowed origins (`https://agnai.chat` and `https://hcatoolkit.com`)
   - `Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD`
   - `Access-Control-Allow-Headers: <echoes sanitized Access-Control-Request-Headers when present, else authorization, content-type, x-venice-proxy-secret, accept>`
   - `Access-Control-Max-Age: 600`
@@ -199,7 +199,8 @@ On shared hosting (including DreamHost), buffering may prevent token-by-token ou
 - **Streaming not token-by-token**
   - Expected on some shared hosts due to output buffering/proxy layers.
 - **`Request header field authorization is not allowed by Access-Control-Allow-Headers in preflight response.`**
-  - This means the WordPress site is still running an older plugin build or returning incomplete CORS preflight headers.
+  - If your failing URL is `/wp-json/venice-proxy/v1/models` or `/wp-json/venice-proxy/v1/chat/completions`, the endpoint path is correct.
+  - The failure means browser preflight did not allow the `authorization` request header.
   - Fix by updating/reinstalling the latest plugin ZIP on the WordPress site.
-  - Confirm preflight includes `Access-Control-Allow-Headers: authorization, content-type` (or a sanitized echo that contains both).
-  - Reminder: merging repository changes is not enough by itself; you must install/update the new plugin ZIP in WordPress.
+  - Confirm preflight includes `Access-Control-Allow-Headers: authorization` (for `/models`) and `Access-Control-Allow-Headers: authorization, content-type` (for `/chat/completions`) or a sanitized echoed list that contains those headers.
+  - GitHub merges do not auto-update `hcatoolkit.com`; you must manually install/update the plugin in WordPress after merging.
