@@ -12,6 +12,8 @@ It forwards requests to Venice API base:
 
 Some clients (including Agnai/Agnaistic) may send a `think` field in JSON payloads. Venice may reject that field. This proxy removes every `think` key (including nested ones) before forwarding JSON upstream.
 
+The proxy preserves Venice-compatible `reasoning` payloads and only strips disallowed `think` keys.
+
 ## Install (DreamHost / standard WordPress)
 
 1. Put `venice-ai-reverse-proxy.php` in:
@@ -19,8 +21,8 @@ Some clients (including Agnai/Agnaistic) may send a `think` field in JSON payloa
 2. In `wp-config.php`, set required constants:
 
 ```php
-define( 'VENICE_API_KEY', 'real-venice-api-key-here' );
-define( 'VENICE_PROXY_SHARED_SECRET', 'long-random-proxy-secret-here' );
+define( 'VENICE_API_KEY', 'YOUR_VENICE_API_KEY' );
+define( 'VENICE_PROXY_SHARED_SECRET', 'YOUR_PROXY_SHARED_SECRET' );
 ```
 
 3. Optional constants:
@@ -37,35 +39,64 @@ define( 'VENICE_PROXY_TIMEOUT', 120 );
 - **Base URL**: `https://your-site.com/wp-json/venice-proxy/v1`
 - **API key**: your proxy shared secret (`VENICE_PROXY_SHARED_SECRET`), not your Venice key.
 
-## cURL tests
+## cURL examples (placeholders only)
 
-### Models
+### Direct Venice request
 
 ```bash
-curl -i \
-  -H "Authorization: Bearer YOUR_PROXY_SHARED_SECRET" \
-  "https://your-site.com/wp-json/venice-proxy/v1/models"
+curl https://api.venice.ai/api/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_VENICE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v3.2",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Your question here"
+      }
+    ],
+    "reasoning": {
+      "max_tokens": 4096,
+      "strategy": "chain_of_thought"
+    },
+    "stream": true,
+    "temperature": 0.7,
+    "max_tokens": 2048,
+    "top_p": 0.9,
+    "frequency_penalty": 0,
+    "presence_penalty": 0
+  }'
 ```
 
-### Chat completions with top-level `think`
+### WordPress proxy request
 
 ```bash
-curl -i \
+curl https://your-site.com/wp-json/venice-proxy/v1/chat/completions \
   -H "Authorization: Bearer YOUR_PROXY_SHARED_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"model":"venice-large","messages":[{"role":"user","content":"hi"}],"think":true}' \
-  "https://your-site.com/wp-json/venice-proxy/v1/chat/completions"
+  -d '{
+    "model": "deepseek-v3.2",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Your question here"
+      }
+    ],
+    "reasoning": {
+      "max_tokens": 4096,
+      "strategy": "chain_of_thought"
+    },
+    "stream": true,
+    "temperature": 0.7,
+    "max_tokens": 2048,
+    "top_p": 0.9,
+    "frequency_penalty": 0,
+    "presence_penalty": 0,
+    "think": true
+  }'
 ```
 
-### Nested `think` removal example
-
-```bash
-curl -i \
-  -H "Authorization: Bearer YOUR_PROXY_SHARED_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"stream":false,"payload":{"nested":{"think":"remove-me"}},"messages":[{"role":"user","content":"hello"}]}' \
-  "https://your-site.com/wp-json/venice-proxy/v1/chat/completions"
-```
+In the proxy example above, the proxy removes `think` before Venice sees the request, while preserving the `reasoning` object.
 
 ## Streaming note
 

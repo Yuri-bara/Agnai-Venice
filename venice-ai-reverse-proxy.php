@@ -31,6 +31,7 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			'cookie',
 			'authorization',
 			'accept-encoding',
+			'x-venice-proxy-secret',
 		);
 
 		private $blocked_response_headers = array(
@@ -45,6 +46,7 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 
 		public function __construct() {
 			add_action( 'rest_api_init', array( $this, 'register_routes' ) );
+			add_filter( 'rest_pre_serve_request', array( $this, 'serve_raw_proxy_response' ), 10, 4 );
 		}
 
 		public function register_routes() {
@@ -81,15 +83,19 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			}
 
 			$target_url = $this->build_target_url( $request );
-			$headers    = $this->build_forward_headers( $request, $api_key );
-			$body_info  = $this->build_forward_body( $request );
+			if ( '' === $target_url ) {
+				return new WP_Error( 'venice_proxy_invalid_target_path', 'Invalid target path.', array( 'status' => 400 ) );
+			}
+
+			$headers   = $this->build_forward_headers( $request, $api_key );
+			$body_info = $this->build_forward_body( $request );
 
 			if ( is_wp_error( $body_info ) ) {
 				return $body_info;
 			}
 
 			if ( $body_info['is_stream'] ) {
-				return $this->stream_with_curl( $request->get_method(), $target_url, $headers, $body_info['body'] );
+				return $this->stream_with_curl( $request->get_method(), $target_url, $headers, $body_info['body'], 'HEAD' === strtoupper( $request->get_method() ) );
 			}
 
 			$args = array(
@@ -105,23 +111,31 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 				return new WP_Error( 'venice_proxy_upstream_failed', 'Failed upstream request: ' . $upstream->get_error_message(), array( 'status' => 502 ) );
 			}
 
-			$status_code = wp_remote_retrieve_response_code( $upstream );
-			if ( empty( $status_code ) ) {
+			$status_code = (int) wp_remote_retrieve_response_code( $upstream );
+			if ( $status_code <= 0 ) {
 				return new WP_Error( 'venice_proxy_invalid_upstream_response', 'Invalid upstream response from Venice API.', array( 'status' => 502 ) );
 			}
 
-			$response = new WP_REST_Response( wp_remote_retrieve_body( $upstream ), $status_code );
-			foreach ( $this->filter_response_headers( wp_remote_retrieve_headers( $upstream ) ) as $name => $value ) {
-				$response->header( $name, $value );
-			}
-
-			return $response;
+			return $this->build_proxy_response(
+				$status_code,
+				$this->filter_response_headers( wp_remote_retrieve_headers( $upstream ) ),
+				wp_remote_retrieve_body( $upstream ),
+				'HEAD' === strtoupper( $request->get_method() )
+			);
 		}
 
 		private function build_target_url( WP_REST_Request $request ) {
 			$base       = defined( 'VENICE_PROXY_TARGET_BASE' ) ? (string) VENICE_PROXY_TARGET_BASE : self::DEFAULT_TARGET_BASE;
-			$proxy_path = ltrim( (string) $request->get_param( 'proxy_path' ), '/' );
-			$url        = rtrim( $base, '/' ) . '/' . $proxy_path;
+			$proxy_path = (string) $request->get_param( 'proxy_path' );
+			$safe_path  = $this->sanitize_proxy_path( $proxy_path );
+			if ( '' === $safe_path && '' !== trim( $proxy_path ) ) {
+				return '';
+			}
+
+			$url = rtrim( $base, '/' );
+			if ( '' !== $safe_path ) {
+				$url .= '/' . $safe_path;
+			}
 
 			$params = $request->get_query_params();
 			unset( $params['proxy_path'], $params['think'], $params['x_venice_proxy_secret'] );
@@ -133,16 +147,46 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			return $url;
 		}
 
+		private function sanitize_proxy_path( $proxy_path ) {
+			$trimmed = ltrim( trim( (string) $proxy_path ), '/' );
+			if ( '' === $trimmed ) {
+				return '';
+			}
+			if ( preg_match( '#^[a-z][a-z0-9+\-.]*://#i', $trimmed ) ) {
+				return '';
+			}
+
+			$segments = array_filter(
+				explode( '/', $trimmed ),
+				function ( $segment ) {
+					return '' !== $segment && '.' !== $segment && '..' !== $segment;
+				}
+			);
+
+			return implode( '/', $segments );
+		}
+
 		private function build_forward_headers( WP_REST_Request $request, $api_key ) {
 			$headers = array();
 
 			foreach ( $request->get_headers() as $name => $values ) {
-				$normalized = strtolower( $name );
+				$normalized = strtolower( str_replace( '_', '-', (string) $name ) );
 				if ( in_array( $normalized, $this->blocked_request_headers, true ) ) {
 					continue;
 				}
 
-				$headers[ $name ] = is_array( $values ) ? implode( ', ', $values ) : (string) $values;
+				$canonical_name = $this->canonical_header_name( $normalized );
+				if ( ! $this->is_valid_header_name( $canonical_name ) ) {
+					continue;
+				}
+
+				$header_value = is_array( $values ) ? implode( ', ', $values ) : (string) $values;
+				$safe_value   = $this->safe_header_value( $header_value );
+				if ( '' === $safe_value ) {
+					continue;
+				}
+
+				$headers[ $canonical_name ] = $safe_value;
 			}
 
 			$headers['Authorization'] = 'Bearer ' . $api_key;
@@ -162,24 +206,33 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 				return array( 'body' => null, 'is_stream' => false );
 			}
 
-			$content_type = strtolower( (string) $request->get_header( 'content-type' ) );
-			if ( false !== strpos( $content_type, 'application/json' ) ) {
-				$decoded = json_decode( $raw_body, true );
-				if ( JSON_ERROR_NONE !== json_last_error() ) {
-					return new WP_Error( 'venice_proxy_invalid_json', 'Invalid JSON request body.', array( 'status' => 400 ) );
-				}
-
-				$sanitized = $this->remove_disallowed_fields( $decoded );
-				$encoded   = wp_json_encode( $sanitized );
-				if ( false === $encoded ) {
-					return new WP_Error( 'venice_proxy_json_encode_failed', 'Failed to encode sanitized JSON body.', array( 'status' => 500 ) );
-				}
-
-				$is_stream = is_array( $sanitized ) && ! empty( $sanitized['stream'] );
-				return array( 'body' => $encoded, 'is_stream' => $is_stream );
+			if ( ! $this->should_transform_json_body( $request, $raw_body ) ) {
+				return array( 'body' => $raw_body, 'is_stream' => false );
 			}
 
-			return array( 'body' => $raw_body, 'is_stream' => false );
+			$decoded = json_decode( $raw_body, true );
+			if ( JSON_ERROR_NONE !== json_last_error() ) {
+				return new WP_Error( 'venice_proxy_invalid_json', 'Invalid JSON request body.', array( 'status' => 400 ) );
+			}
+
+			$sanitized = $this->remove_disallowed_fields( $decoded );
+			$encoded   = wp_json_encode( $sanitized );
+			if ( false === $encoded ) {
+				return new WP_Error( 'venice_proxy_json_encode_failed', 'Failed to encode sanitized JSON body.', array( 'status' => 500 ) );
+			}
+
+			$is_stream = is_array( $sanitized ) && ! empty( $sanitized['stream'] );
+			return array( 'body' => $encoded, 'is_stream' => $is_stream );
+		}
+
+		private function should_transform_json_body( WP_REST_Request $request, $raw_body ) {
+			$content_type = strtolower( (string) $request->get_header( 'content-type' ) );
+			if ( false !== strpos( $content_type, 'application/json' ) || false !== strpos( $content_type, '+json' ) ) {
+				return true;
+			}
+
+			$trimmed_body = ltrim( (string) $raw_body );
+			return '' !== $trimmed_body && ( '{' === $trimmed_body[0] || '[' === $trimmed_body[0] );
 		}
 
 		private function remove_disallowed_fields( $value ) {
@@ -196,7 +249,7 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			return $value;
 		}
 
-		private function stream_with_curl( $method, $url, array $headers, $body ) {
+		private function stream_with_curl( $method, $url, array $headers, $body, $is_head ) {
 			if ( ! function_exists( 'curl_init' ) ) {
 				return new WP_Error( 'venice_proxy_streaming_unavailable', 'Streaming is unavailable because cURL is not installed.', array( 'status' => 500 ) );
 			}
@@ -205,9 +258,23 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			foreach ( $headers as $k => $v ) {
 				$curl_headers[] = $k . ': ' . $v;
 			}
+			$curl_headers[] = 'Expect:';
 
-			$response_headers = array();
-			$status_code      = 200;
+			$current_headers      = array();
+			$current_status_code  = 0;
+			$final_headers        = array();
+			$final_status_code    = 200;
+			$headers_sent         = false;
+
+			$emit_final_headers = function () use ( &$headers_sent, &$final_status_code, &$final_headers ) {
+				if ( $headers_sent || headers_sent() ) {
+					return;
+				}
+				status_header( $final_status_code );
+				$this->send_headers_from_array( $this->filter_response_headers( $final_headers ) );
+				header( 'X-Venice-Proxy-Streaming: best-effort', true );
+				$headers_sent = true;
+			};
 
 			$ch = curl_init( $url );
 			curl_setopt( $ch, CURLOPT_CUSTOMREQUEST, $method );
@@ -215,39 +282,46 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			curl_setopt( $ch, CURLOPT_TIMEOUT, $this->get_timeout() );
 			curl_setopt( $ch, CURLOPT_FOLLOWLOCATION, false );
 			curl_setopt( $ch, CURLOPT_RETURNTRANSFER, false );
-			curl_setopt( $ch, CURLOPT_HEADERFUNCTION, function ( $curl, $header ) use ( &$response_headers, &$status_code ) {
+			curl_setopt( $ch, CURLOPT_HEADERFUNCTION, function ( $curl, $header ) use ( &$current_headers, &$current_status_code, &$final_headers, &$final_status_code, &$headers_sent, $emit_final_headers ) {
 				$trimmed = trim( $header );
 				if ( '' === $trimmed ) {
+					if ( $current_status_code >= 100 && $current_status_code < 200 ) {
+						$current_headers     = array();
+						$current_status_code = 0;
+						return strlen( $header );
+					}
+					if ( $current_status_code >= 200 && ! $headers_sent ) {
+						$final_status_code = $current_status_code;
+						$final_headers     = $current_headers;
+						$emit_final_headers();
+					}
 					return strlen( $header );
 				}
 				if ( 0 === stripos( $trimmed, 'HTTP/' ) ) {
+					$current_headers = array();
 					$parts = explode( ' ', $trimmed );
-					if ( isset( $parts[1] ) ) {
-						$status_code = (int) $parts[1];
-					}
+					$current_status_code = isset( $parts[1] ) ? (int) $parts[1] : 0;
 					return strlen( $header );
 				}
 				$pieces = explode( ':', $trimmed, 2 );
 				if ( 2 === count( $pieces ) ) {
-					$response_headers[ trim( $pieces[0] ) ] = trim( $pieces[1] );
+					$current_headers[ trim( $pieces[0] ) ] = trim( $pieces[1] );
 				}
 				return strlen( $header );
 			} );
-			curl_setopt( $ch, CURLOPT_WRITEFUNCTION, function ( $curl, $chunk ) {
-				echo $chunk;
-				if ( function_exists( 'ob_flush' ) ) {
-					@ob_flush();
+			curl_setopt( $ch, CURLOPT_WRITEFUNCTION, function ( $curl, $chunk ) use ( $is_head, $emit_final_headers ) {
+				$emit_final_headers();
+				if ( ! $is_head ) {
+					echo $chunk;
+					if ( function_exists( 'ob_flush' ) ) {
+						@ob_flush();
+					}
+					flush();
 				}
-				flush();
 				return strlen( $chunk );
 			} );
 			if ( null !== $body ) {
 				curl_setopt( $ch, CURLOPT_POSTFIELDS, $body );
-			}
-
-			if ( ! headers_sent() ) {
-				status_header( 200 );
-				header( 'X-Venice-Proxy-Streaming: best-effort' );
 			}
 
 			$ok = curl_exec( $ch );
@@ -258,17 +332,51 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			}
 			curl_close( $ch );
 
-			if ( ! headers_sent() ) {
-				status_header( $status_code );
-				$this->send_headers_from_array( $this->filter_response_headers( $response_headers ) );
+			$emit_final_headers();
+
+			exit;
+		}
+
+		private function build_proxy_response( $status_code, array $headers, $body, $is_head ) {
+			$response = new WP_REST_Response(
+				array(
+					'__venice_proxy_raw' => true,
+					'status'             => (int) $status_code,
+					'headers'            => $headers,
+					'body'               => (string) $body,
+					'is_head'            => (bool) $is_head,
+				),
+				(int) $status_code
+			);
+			return $response;
+		}
+
+		public function serve_raw_proxy_response( $served, $result, $request, $server ) {
+			if ( $served || ! ( $result instanceof WP_REST_Response ) ) {
+				return $served;
 			}
 
-			return $this->send_raw_response( '' );
+			$data = $result->get_data();
+			if ( ! $this->is_proxy_response( $data ) ) {
+				return $served;
+			}
+
+			if ( ! headers_sent() ) {
+				status_header( (int) $data['status'] );
+				$this->send_headers_from_array( $data['headers'] );
+			}
+
+			if ( ! $data['is_head'] ) {
+				echo (string) $data['body'];
+			}
+
+			return true;
 		}
 
-		private function send_raw_response( $body ) {
-			return new WP_REST_Response( $body, null );
+		private function is_proxy_response( $data ) {
+			return is_array( $data ) && ! empty( $data['__venice_proxy_raw'] ) && isset( $data['status'], $data['headers'], $data['body'], $data['is_head'] );
 		}
+
 
 		private function send_headers_from_array( array $headers ) {
 			foreach ( $headers as $name => $value ) {
@@ -276,14 +384,40 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			}
 		}
 
+		private function canonical_header_name( $name ) {
+			$parts = explode( '-', strtolower( (string) $name ) );
+			$parts = array_map( 'ucfirst', $parts );
+			return implode( '-', $parts );
+		}
+
+		private function is_valid_header_name( $name ) {
+			return 1 === preg_match( '/^[A-Za-z0-9!#$%&\'"*+.^_`|~-]+(?:-[A-Za-z0-9!#$%&\'"*+.^_`|~-]+)*$/', (string) $name );
+		}
+
+		private function safe_header_value( $value ) {
+			if ( preg_match( '/[\r\n]/', (string) $value ) ) {
+				return '';
+			}
+			return trim( (string) $value );
+		}
+
 		private function filter_response_headers( $headers ) {
 			$filtered = array();
 			foreach ( $headers as $name => $value ) {
-				$normalized = strtolower( (string) $name );
+				$canonical_name = $this->canonical_header_name( $name );
+				$normalized     = strtolower( str_replace( '_', '-', (string) $name ) );
 				if ( in_array( $normalized, $this->blocked_response_headers, true ) ) {
 					continue;
 				}
-				$filtered[ $name ] = is_array( $value ) ? implode( ', ', $value ) : (string) $value;
+				if ( ! $this->is_valid_header_name( $canonical_name ) ) {
+					continue;
+				}
+				$joined     = is_array( $value ) ? implode( ', ', $value ) : (string) $value;
+				$safe_value = $this->safe_header_value( $joined );
+				if ( '' === $safe_value ) {
+					continue;
+				}
+				$filtered[ $canonical_name ] = $safe_value;
 			}
 			return $filtered;
 		}
