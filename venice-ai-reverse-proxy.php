@@ -46,6 +46,7 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 
 		public function __construct() {
 			add_action( 'rest_api_init', array( $this, 'register_routes' ) );
+			add_filter( 'rest_pre_serve_request', array( $this, 'serve_raw_proxy_response' ), 10, 4 );
 		}
 
 		public function register_routes() {
@@ -115,7 +116,7 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 				return new WP_Error( 'venice_proxy_invalid_upstream_response', 'Invalid upstream response from Venice API.', array( 'status' => 502 ) );
 			}
 
-			$this->send_raw_upstream_response(
+			return $this->build_proxy_response(
 				$status_code,
 				$this->filter_response_headers( wp_remote_retrieve_headers( $upstream ) ),
 				wp_remote_retrieve_body( $upstream ),
@@ -257,10 +258,23 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			foreach ( $headers as $k => $v ) {
 				$curl_headers[] = $k . ': ' . $v;
 			}
+			$curl_headers[] = 'Expect:';
 
-			$response_headers = array();
-			$status_code      = 200;
-			$headers_sent     = false;
+			$current_headers      = array();
+			$current_status_code  = 0;
+			$final_headers        = array();
+			$final_status_code    = 200;
+			$headers_sent         = false;
+
+			$emit_final_headers = function () use ( &$headers_sent, &$final_status_code, &$final_headers ) {
+				if ( $headers_sent || headers_sent() ) {
+					return;
+				}
+				status_header( $final_status_code );
+				$this->send_headers_from_array( $this->filter_response_headers( $final_headers ) );
+				header( 'X-Venice-Proxy-Streaming: best-effort', true );
+				$headers_sent = true;
+			};
 
 			$ch = curl_init( $url );
 			curl_setopt( $ch, CURLOPT_CUSTOMREQUEST, $method );
@@ -268,32 +282,35 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			curl_setopt( $ch, CURLOPT_TIMEOUT, $this->get_timeout() );
 			curl_setopt( $ch, CURLOPT_FOLLOWLOCATION, false );
 			curl_setopt( $ch, CURLOPT_RETURNTRANSFER, false );
-			curl_setopt( $ch, CURLOPT_HEADERFUNCTION, function ( $curl, $header ) use ( &$response_headers, &$status_code, &$headers_sent ) {
+			curl_setopt( $ch, CURLOPT_HEADERFUNCTION, function ( $curl, $header ) use ( &$current_headers, &$current_status_code, &$final_headers, &$final_status_code, &$headers_sent, $emit_final_headers ) {
 				$trimmed = trim( $header );
 				if ( '' === $trimmed ) {
-					if ( ! $headers_sent && ! headers_sent() ) {
-						status_header( $status_code );
-						$this->send_headers_from_array( $this->filter_response_headers( $response_headers ) );
-						header( 'X-Venice-Proxy-Streaming: best-effort', true );
-						$headers_sent = true;
+					if ( $current_status_code >= 100 && $current_status_code < 200 ) {
+						$current_headers     = array();
+						$current_status_code = 0;
+						return strlen( $header );
+					}
+					if ( $current_status_code >= 200 && ! $headers_sent ) {
+						$final_status_code = $current_status_code;
+						$final_headers     = $current_headers;
+						$emit_final_headers();
 					}
 					return strlen( $header );
 				}
 				if ( 0 === stripos( $trimmed, 'HTTP/' ) ) {
-					$response_headers = array();
-					$parts            = explode( ' ', $trimmed );
-					if ( isset( $parts[1] ) ) {
-						$status_code = (int) $parts[1];
-					}
+					$current_headers = array();
+					$parts = explode( ' ', $trimmed );
+					$current_status_code = isset( $parts[1] ) ? (int) $parts[1] : 0;
 					return strlen( $header );
 				}
 				$pieces = explode( ':', $trimmed, 2 );
 				if ( 2 === count( $pieces ) ) {
-					$response_headers[ trim( $pieces[0] ) ] = trim( $pieces[1] );
+					$current_headers[ trim( $pieces[0] ) ] = trim( $pieces[1] );
 				}
 				return strlen( $header );
 			} );
-			curl_setopt( $ch, CURLOPT_WRITEFUNCTION, function ( $curl, $chunk ) use ( $is_head ) {
+			curl_setopt( $ch, CURLOPT_WRITEFUNCTION, function ( $curl, $chunk ) use ( $is_head, $emit_final_headers ) {
+				$emit_final_headers();
 				if ( ! $is_head ) {
 					echo $chunk;
 					if ( function_exists( 'ob_flush' ) ) {
@@ -315,26 +332,51 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			}
 			curl_close( $ch );
 
-			if ( ! $headers_sent && ! headers_sent() ) {
-				status_header( $status_code );
-				$this->send_headers_from_array( $this->filter_response_headers( $response_headers ) );
-				header( 'X-Venice-Proxy-Streaming: best-effort', true );
-			}
+			$emit_final_headers();
 
 			exit;
 		}
 
-		private function send_raw_upstream_response( $status_code, $headers, $body, $is_head ) {
+		private function build_proxy_response( $status_code, array $headers, $body, $is_head ) {
+			$response = new WP_REST_Response(
+				array(
+					'__venice_proxy_raw' => true,
+					'status'             => (int) $status_code,
+					'headers'            => $headers,
+					'body'               => (string) $body,
+					'is_head'            => (bool) $is_head,
+				),
+				(int) $status_code
+			);
+			return $response;
+		}
+
+		public function serve_raw_proxy_response( $served, $result, $request, $server ) {
+			if ( $served || ! ( $result instanceof WP_REST_Response ) ) {
+				return $served;
+			}
+
+			$data = $result->get_data();
+			if ( ! $this->is_proxy_response( $data ) ) {
+				return $served;
+			}
+
 			if ( ! headers_sent() ) {
-				status_header( (int) $status_code );
-				$this->send_headers_from_array( $headers );
+				status_header( (int) $data['status'] );
+				$this->send_headers_from_array( $data['headers'] );
 			}
 
-			if ( ! $is_head ) {
-				echo (string) $body;
+			if ( ! $data['is_head'] ) {
+				echo (string) $data['body'];
 			}
-			exit;
+
+			return true;
 		}
+
+		private function is_proxy_response( $data ) {
+			return is_array( $data ) && ! empty( $data['__venice_proxy_raw'] ) && isset( $data['status'], $data['headers'], $data['body'], $data['is_head'] );
+		}
+
 
 		private function send_headers_from_array( array $headers ) {
 			foreach ( $headers as $name => $value ) {
