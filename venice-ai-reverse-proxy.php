@@ -151,22 +151,59 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 				return $this->build_cors_preflight_response( $request );
 			}
 
+			$simulated = $this->get_simulated_cors_request_context( $request );
+
 			$response = new WP_REST_Response(
 				array(
-					'plugin'               => 'venice-ai-reverse-proxy',
-					'version'              => self::PLUGIN_VERSION,
-					'routeHandledByPlugin' => true,
-					'origin'               => $this->safe_header_value( (string) $request->get_header( 'origin' ) ),
-					'allowOrigin'          => $this->get_cors_allow_origin_value( $request ),
-					'requestMethod'        => $this->safe_header_value( (string) $request->get_header( 'access-control-request-method' ) ),
-					'requestHeaders'       => $this->sanitize_cors_request_headers( (string) $request->get_header( 'access-control-request-headers' ) ),
-					'allowHeaders'         => $this->get_cors_allow_headers_value( $request ),
-					'allowMethods'         => 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD',
+					'version'                  => self::PLUGIN_VERSION,
+					'routeHandledByPlugin'     => true,
+					'simulatedOrigin'          => $simulated['origin'],
+					'allowOrigin'              => $simulated['allow_origin'],
+					'simulatedRequestMethod'   => $simulated['request_method'],
+					'simulatedRequestHeaders'  => $simulated['request_headers'],
+					'allowHeaders'             => $simulated['allow_headers'],
+					'allowMethods'             => $simulated['allow_methods'],
 				),
 				200
 			);
+			$this->add_debug_cors_headers_to_response( $response, $simulated );
 			$this->add_no_cache_headers_to_response( $response );
 			return $response;
+		}
+
+
+		private function get_simulated_cors_request_context( WP_REST_Request $request ) {
+			$origin  = $this->safe_header_value( (string) $request->get_param( 'origin' ) );
+			$method  = $this->safe_header_value( (string) $request->get_param( 'method' ) );
+			$headers = $this->sanitize_cors_request_headers( (string) $request->get_param( 'headers' ) );
+
+			if ( '' === $origin ) {
+				$origin = $this->safe_header_value( (string) $request->get_header( 'origin' ) );
+			}
+			if ( '' === $method ) {
+				$method = $this->safe_header_value( (string) $request->get_header( 'access-control-request-method' ) );
+			}
+			if ( '' === $headers ) {
+				$headers = $this->sanitize_cors_request_headers( (string) $request->get_header( 'access-control-request-headers' ) );
+			}
+
+			return array(
+				'origin'          => $origin,
+				'request_method'  => $method,
+				'request_headers' => $headers,
+				'allow_origin'    => $this->get_cors_allow_origin_value( $request, $origin ),
+				'allow_headers'   => $this->get_cors_allow_headers_value( $request, $headers ),
+				'allow_methods'   => 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD',
+			);
+		}
+
+		private function add_debug_cors_headers_to_response( WP_HTTP_Response $response, array $simulated ) {
+			if ( '' !== $simulated['allow_origin'] ) {
+				$response->header( 'Access-Control-Allow-Origin', $simulated['allow_origin'] );
+			}
+			$response->header( 'Access-Control-Allow-Headers', $simulated['allow_headers'] );
+			$response->header( 'Access-Control-Allow-Methods', $simulated['allow_methods'] );
+			$this->add_plugin_debug_headers_to_response( $response );
 		}
 
 		private function build_target_url( WP_REST_Request $request ) {
@@ -488,14 +525,14 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			$response->header( 'X-Venice-Proxy-Route', '1' );
 		}
 
-		private function get_cors_allow_headers_value( WP_REST_Request $request = null ) {
+		private function get_cors_allow_headers_value( WP_REST_Request $request = null, $requested_headers_override = null ) {
 			$minimum_tokens = array( 'authorization', 'content-type', 'accept', 'x-venice-proxy-secret' );
 			$fallback       = implode( ', ', $minimum_tokens );
 			if ( ! ( $request instanceof WP_REST_Request ) ) {
 				return $fallback;
 			}
 
-			$requested_headers = $this->sanitize_cors_request_headers( (string) $request->get_header( 'access-control-request-headers' ) );
+			$requested_headers = null === $requested_headers_override ? $this->sanitize_cors_request_headers( (string) $request->get_header( 'access-control-request-headers' ) ) : $this->sanitize_cors_request_headers( (string) $requested_headers_override );
 			if ( '' === $requested_headers ) {
 				return $fallback;
 			}
@@ -512,12 +549,12 @@ if ( ! class_exists( 'Venice_AI_Reverse_Proxy' ) ) {
 			return implode( ', ', $merged );
 		}
 
-		private function get_cors_allow_origin_value( WP_REST_Request $request = null ) {
+		private function get_cors_allow_origin_value( WP_REST_Request $request = null, $origin_override = null ) {
 			if ( ! ( $request instanceof WP_REST_Request ) ) {
 				return '';
 			}
 
-			$origin = $this->safe_header_value( (string) $request->get_header( 'origin' ) );
+			$origin = null === $origin_override ? $this->safe_header_value( (string) $request->get_header( 'origin' ) ) : $this->safe_header_value( (string) $origin_override );
 			$allowed_origins = array(
 				'https://agnai.chat',
 				'https://hcatoolkit.com',
